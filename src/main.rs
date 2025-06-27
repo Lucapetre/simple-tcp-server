@@ -9,10 +9,17 @@ use std::time::Duration;
 struct Client {
     sender: Sender<String>,
     receiver: Receiver<String>,
+    messageGroup: String,
+}
+
+impl Client {
+    fn send(&mut self, message: String) {
+        self.sender.send(message).unwrap_or_else(|_| println!("Channel failed"));
+    }
 }
 
 
-fn connect_stream(mut stream: TcpStream) -> (Sender<String>, Receiver<String>)  {
+fn connect_stream(mut stream: TcpStream) -> Client  {
     let (main_tx, thread_rx) = mpsc::channel::<String>();
     let (thread_tx, main_rx) = mpsc::channel::<String>();
     let mut stream_clone = stream.try_clone().unwrap();
@@ -48,7 +55,7 @@ fn connect_stream(mut stream: TcpStream) -> (Sender<String>, Receiver<String>)  
         }
         println!("Connection closed. rx");
     });
-    (main_tx, main_rx)
+    Client {sender:main_tx, receiver:main_rx, messageGroup:String::from("all")}
 }
 
 fn main() {
@@ -80,9 +87,9 @@ fn main() {
         };
 
         if let Some(stream) = maybe_stream {
-            let (main_tx, main_rx) = connect_stream(stream);
-            main_tx.send("Welcome from server\n".to_string()).unwrap_or(());
-            clients.push(Client { sender: main_tx, receiver: main_rx });
+            let mut client = connect_stream(stream);
+            client.send("Welcome! Use /help for available commands\n".to_string());
+            clients.push(client);
         }
         clients.retain(|client| {
             match client.receiver.try_recv() {
