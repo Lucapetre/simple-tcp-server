@@ -1,12 +1,12 @@
-use std::collections::{BTreeSet, HashSet};
-use std::fmt::format;
-use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
+use std::collections::{BTreeSet};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::io::{Read, Write};
 use std::sync::{mpsc, Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{Receiver, SendError, Sender, TryRecvError};
+use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::thread;
 use std::time::Duration;
+use std::env;
 
 const HELP_MESSAGE: &'static str = "Syntax: /<command> [arguments...]\n\
 Available Commands:\n\
@@ -24,8 +24,8 @@ struct Client {
     sender: Sender<String>,
     receiver: Receiver<String>,
     socket_addr: SocketAddr,
-    messageGroup: String,
-    joinedGroups: BTreeSet<String>,
+    message_group: String,
+    joined_groups: BTreeSet<String>,
 }
 
 impl Client {
@@ -36,8 +36,8 @@ impl Client {
             sender: tx,
             receiver: rx,
             socket_addr: host_address,
-            messageGroup: String::from("all"),
-            joinedGroups: vec![String::from("all")].into_iter().collect(),
+            message_group: String::from("all"),
+            joined_groups: vec![String::from("all")].into_iter().collect(),
         }
     }
     fn send(&mut self, message: String) {
@@ -47,9 +47,9 @@ impl Client {
     fn execute_command(&mut self, command: &Command) {
         match command.command_type {
             CommandType::NormalMessage => {
-                if self.joinedGroups.contains(command.group.as_ref().unwrap()) {
+                if self.joined_groups.contains(command.group.as_ref().unwrap()) {
                     let message = command.message.as_ref().unwrap();
-                    self.send(format!["[{}] {}", self.messageGroup, message]);
+                    self.send(format!["[{}] {}", self.message_group, message]);
                 }
             }
             CommandType::Help => {
@@ -60,7 +60,7 @@ impl Client {
             CommandType::JoinGroup => {
                 if self.id == command.author_id {
                     let group = command.group.as_ref().unwrap();
-                    let joined = self.joinedGroups.insert(group.clone());
+                    let joined = self.joined_groups.insert(group.clone());
                     if joined {
                         self.send(format!["Joined group {}\n", group]);
                     } else {
@@ -71,7 +71,7 @@ impl Client {
             CommandType::LeaveGroup => {
                 if self.id == command.author_id {
                     let group = command.group.as_ref().unwrap();
-                    let removed = self.joinedGroups.remove(group);
+                    let removed = self.joined_groups.remove(group);
                     if removed {
                         self.send(format!["Removed user from group {}\n", group]);
                     } else {
@@ -81,8 +81,8 @@ impl Client {
             }
             CommandType::ChangeMessageGroup => {
                 if self.id == command.author_id {
-                    self.messageGroup = command.group.as_ref().unwrap().clone();
-                    self.send(format!["Changed messaging group to: {}\n", self.messageGroup]);
+                    self.message_group = command.group.as_ref().unwrap().clone();
+                    self.send(format!["Changed messaging group to: {}\n", self.message_group]);
                 }
             }
             CommandType::InvalidInput => {
@@ -94,10 +94,6 @@ impl Client {
     }
 }
 
-struct Message {
-    message: String,
-    author_id: usize,
-}
 
 enum CommandType {
     NormalMessage,
@@ -142,7 +138,7 @@ impl Command {
             author_id: author.id,
             command_type: CommandType::NormalMessage,
             message: Some(command_string),
-            group: Some(author.messageGroup.clone()),
+            group: Some(author.message_group.clone()),
         }
     }
     fn invalid_command(author_id: usize) -> Self {
@@ -173,7 +169,6 @@ fn connect_stream(stream_with_address: (TcpStream, SocketAddr)) -> Client  {
                 Err(_) => break,
             }
         }
-        println!("Connection closed. tx");
     });
     thread::spawn(move || {
         loop { // output thread
@@ -187,14 +182,21 @@ fn connect_stream(stream_with_address: (TcpStream, SocketAddr)) -> Client  {
                 Err(_) => {break;}
             }
         }
-        println!("Connection closed. rx");
     });
     Client::new(main_tx, main_rx, stream_with_address.1)
 }
 
 fn main() {
-    // Create a TCP listener on port 8080
-    let listener = TcpListener::bind("127.0.0.1:8080").unwrap();
+    let args:Vec<String> = env::args().collect();
+    let mut address:SocketAddr =  SocketAddr::from(([127, 0, 0, 1], 8080));
+    if args.len() > 2 {
+        panic!("Too many arguments provided. You should provide only a port number");
+    }
+    if args.len() == 2 {
+        address.set_port(args[1].parse().expect("Provide a valid port number"));
+    }
+    println!("Opening server at port {}", address.port());
+    let listener = TcpListener::bind(address).unwrap();
     let unopened_connections = Arc::new(Mutex::new(Vec::<(TcpStream, SocketAddr)>::new()));
     let conn_clone = unopened_connections.clone();
     thread::spawn(move || {
@@ -226,12 +228,16 @@ fn main() {
             clients.push(client);
             println!("There are {} clients", clients.len());
         }
+        let mut removed_someone = false;
         clients.retain(|client| {
             match client.receiver.try_recv() {
             Ok(msg) => {
-                commands.push(Command::from_string(msg, client));; true},
-            Err(TryRecvError::Disconnected) => {false}, Err(TryRecvError::Empty) => {true},
+                commands.push(Command::from_string(msg, client)); true},
+            Err(TryRecvError::Disconnected) => {removed_someone = true; false}, Err(TryRecvError::Empty) => {true},
         }});
+        if removed_someone {
+            println!("There are {} clients", clients.len());
+        }
 
         // TODO: convert to commands and process
 
