@@ -7,6 +7,7 @@ use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::thread;
 use std::time::Duration;
 use std::env;
+use log::{debug, error, info, trace, warn};
 
 const HELP_MESSAGE: &'static str = "Syntax: /<command> [arguments...]\n\
 Available Commands:\n\
@@ -41,7 +42,12 @@ impl Client {
         }
     }
     fn send(&mut self, message: String) {
-        self.sender.send(message).unwrap_or_else(|_| println!("Channel failed"));
+        match self.sender.send(message) {
+            Ok(_) => {}
+            Err(_) => {
+                warn!("Channel of {} failed", self.id);
+            }
+        };
     }
 
     fn execute_command(&mut self, command: &Command) {
@@ -50,11 +56,13 @@ impl Client {
                 if self.joined_groups.contains(command.group.as_ref().unwrap()) {
                     let message = command.message.as_ref().unwrap();
                     self.send(format!["[{}] {}", self.message_group, message]);
+                    trace!("Message sent to {}", self.socket_addr);
                 }
             }
             CommandType::Help => {
                 if self.id == command.author_id {
                     self.send(HELP_MESSAGE.to_string());
+                    trace!("Help message sent to {}", self.socket_addr);
                 }
             }
             CommandType::JoinGroup => {
@@ -63,8 +71,10 @@ impl Client {
                     let joined = self.joined_groups.insert(group.clone());
                     if joined {
                         self.send(format!["Joined group {}\n", group]);
+                        trace!("{} joined group {}", self.socket_addr.to_string(), group);
                     } else {
                         self.send(format!["Already in group {}, nothing is changed\n", group]);
+                        trace!("{} already in group {}", self.socket_addr.to_string(), group);
                     }
                 }
             }
@@ -74,8 +84,10 @@ impl Client {
                     let removed = self.joined_groups.remove(group);
                     if removed {
                         self.send(format!["Removed user from group {}\n", group]);
+                        trace!("{} removed user from {}", self.socket_addr.to_string(), group);
                     } else {
                         self.send(format!["User isn't in group {}, nothing is changed\n", group]);
+                        trace!("{} user isn't in group {}", self.socket_addr.to_string(), group);
                     }
                 }
             }
@@ -83,11 +95,13 @@ impl Client {
                 if self.id == command.author_id {
                     self.message_group = command.group.as_ref().unwrap().clone();
                     self.send(format!["Changed messaging group to: {}\n", self.message_group]);
+                    trace!("{} message group changed to {}", self.socket_addr.to_string(), self.message_group);
                 }
             }
             CommandType::InvalidInput => {
                 if self.id == command.author_id {
                     self.send(INVALID_COMMAND_MESSAGE.to_string());
+                    trace!("Invalid command message sent to {}", self.socket_addr.to_string());
                 }
             }
         }
@@ -187,26 +201,46 @@ fn connect_stream(stream_with_address: (TcpStream, SocketAddr)) -> Client  {
 }
 
 fn main() {
+    // initialize logging
+    env_logger::init();
     let args:Vec<String> = env::args().collect();
     let mut address:SocketAddr =  SocketAddr::from(([127, 0, 0, 1], 8080));
     if args.len() > 2 {
-        panic!("Too many arguments provided. You should provide only a port number");
+        error!("Too many arguments provided. You should provide only a port number. Exiting...");
+        panic!();
     }
     if args.len() == 2 {
+        match args[1].parse::<u16>() {
+            Ok(port) => {
+                address.set_port(port);
+            }
+            Err(_) => {
+                error!("Invalid port provided. You should provide a port number (up to 65536). Exiting...");
+                panic!();
+            }
+        }
         address.set_port(args[1].parse().expect("Provide a valid port number"));
     }
-    println!("Opening server at port {}", address.port());
-    let listener = TcpListener::bind(address).unwrap();
+    info!("Opening server at port {}", address.port());
+    let listener = match TcpListener::bind(address) {
+        Ok(listener) => listener,
+        Err(_) => {
+            error!("Permission denied for port, choose a non-privileged port and try again.");
+            info!("Use sudo only after carefully reviewing this code");
+            panic!();
+        }
+    };
+    info!("Server succesfully opened.");
     let unopened_connections = Arc::new(Mutex::new(Vec::<(TcpStream, SocketAddr)>::new()));
     let conn_clone = unopened_connections.clone();
     thread::spawn(move || {
         loop {
             let mut stream = listener.accept().unwrap();
-            stream.0.write(String::from("hello world\n").as_bytes()).unwrap();
-            println!("Trying to lock");
+            stream.0.write(String::from("Hello world!\n").as_bytes()).unwrap();
+            trace!("Trying to lock connection vector");
             let mut connections = conn_clone.lock().unwrap();
             connections.push(stream);
-            println!("Added connection");
+            trace!("Added connection to vector");
         }
     });
 
@@ -225,24 +259,27 @@ fn main() {
         if let Some(stream) = maybe_stream {
             let mut client = connect_stream(stream);
             client.send("Welcome! Use /help for available commands\n".to_string());
+            info!("Adding client from ip {}", client.socket_addr.to_string());
             clients.push(client);
-            println!("There are {} clients", clients.len());
+            debug!("There are {} clients", clients.len());
         }
         let mut removed_someone = false;
         clients.retain(|client| {
             match client.receiver.try_recv() {
             Ok(msg) => {
                 commands.push(Command::from_string(msg, client)); true},
-            Err(TryRecvError::Disconnected) => {removed_someone = true; false}, Err(TryRecvError::Empty) => {true},
+            Err(TryRecvError::Disconnected) => {
+                removed_someone = true;
+                info!("{} disconnected", client.socket_addr.to_string());
+                false
+            },
+                Err(TryRecvError::Empty) => {true},
         }});
         if removed_someone {
-            println!("There are {} clients", clients.len());
+            debug!("There are {} clients", clients.len());
         }
-
-        // TODO: convert to commands and process
-
+        
         for command in commands.iter() {
-
             for client in clients.iter_mut() {
                 client.execute_command(command);
             }
