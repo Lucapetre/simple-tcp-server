@@ -15,13 +15,15 @@ Available Commands:\n\
 /join <group_name> -> joins a group, allowing messages to be received from that group.\n\
 /leave <group_name> -> leaves a group.\n\
 /change <group_name> -> change the group that you are currently writing to.\n\
+/setname <new_username> -> sets new username.\n\
 \n\
-Note: all group names are alphanumeric characters and letters will be lowercased.\n";
+Note: all usernames and group names are alphanumeric characters and letters will be lowercased.\n";
 const INVALID_COMMAND_MESSAGE: &'static str = "Invalid command.\n\
 Syntax: /<command> [arguments...]\n\
 See /help for all available commands\n";
 struct Client {
     id: usize,
+    username: String,
     sender: Sender<String>,
     receiver: Receiver<String>,
     socket_addr: SocketAddr,
@@ -32,8 +34,10 @@ struct Client {
 impl Client {
     fn new(tx: Sender<String>, rx: Receiver<String>, host_address:SocketAddr) -> Client {
         static CLIENT_COUNTER: AtomicUsize = AtomicUsize::new(0); // keep it safe
+        let new_id = CLIENT_COUNTER.fetch_add(1, Ordering::Relaxed);
         Client {
-            id: CLIENT_COUNTER.fetch_add(1, Ordering::Relaxed),
+            id: new_id,
+            username: host_address.to_string(),
             sender: tx,
             receiver: rx,
             socket_addr: host_address,
@@ -53,9 +57,12 @@ impl Client {
     fn execute_command(&mut self, command: &Command) {
         match command.command_type {
             CommandType::NormalMessage => {
-                if self.joined_groups.contains(command.group.as_ref().unwrap()) {
+                if self.joined_groups.contains(command.group_or_user.as_ref().unwrap()) {
                     let message = command.message.as_ref().unwrap();
-                    self.send(format!["[{}] {}", self.message_group, message]);
+                    if message.eq("\n"){
+                        return;
+                    }
+                    self.send(format!["[{}] {}: {}", self.message_group, command.author_name, message]);
                     trace!("Message sent to {}", self.socket_addr);
                 }
             }
@@ -67,7 +74,7 @@ impl Client {
             }
             CommandType::JoinGroup => {
                 if self.id == command.author_id {
-                    let group = command.group.as_ref().unwrap();
+                    let group = command.group_or_user.as_ref().unwrap();
                     let joined = self.joined_groups.insert(group.clone());
                     if joined {
                         self.send(format!["Joined group {}\n", group]);
@@ -80,7 +87,7 @@ impl Client {
             }
             CommandType::LeaveGroup => {
                 if self.id == command.author_id {
-                    let group = command.group.as_ref().unwrap();
+                    let group = command.group_or_user.as_ref().unwrap();
                     let removed = self.joined_groups.remove(group);
                     if removed {
                         self.send(format!["Removed user from group {}\n", group]);
@@ -93,9 +100,15 @@ impl Client {
             }
             CommandType::ChangeMessageGroup => {
                 if self.id == command.author_id {
-                    self.message_group = command.group.as_ref().unwrap().clone();
+                    self.message_group = command.group_or_user.as_ref().unwrap().clone();
                     self.send(format!["Changed messaging group to: {}\n", self.message_group]);
                     trace!("{} message group changed to {}", self.socket_addr.to_string(), self.message_group);
+                }
+            }
+            CommandType::SetUsername => {
+                if self.id == command.author_id {
+                    self.username = command.group_or_user.as_ref().unwrap().clone();
+                    trace!("{} changed their username to {}", self.socket_addr.to_string(), self.username);
                 }
             }
             CommandType::InvalidInput => {
@@ -115,48 +128,80 @@ enum CommandType {
     JoinGroup,
     LeaveGroup,
     ChangeMessageGroup,
+    SetUsername,
     InvalidInput,
 }
 
 struct Command {
     author_id: usize,
+    author_name: String,
     command_type: CommandType,
     message: Option<String>,
-    group: Option<String>,
+    group_or_user: Option<String>, // username for user changes, else group
 }
 
 impl Command {
-    fn get_group_and_create_command(author_id: usize, command_string: String, command_type: CommandType) -> Command {
-        let group = command_string.split_once(" ").expect("This should not panic").1;
-        let group = group.trim().to_lowercase();
-        if group.contains(|ch: char| !ch.is_ascii_alphanumeric()) {
-            return Self::invalid_command(author_id)
+
+    fn get_command_arg(command_string: String) -> Option<String> {
+        let arg = command_string.split_once(" ").expect("This should not panic").1
+            .trim().to_lowercase();
+        if arg.contains(|ch: char| !ch.is_ascii_alphanumeric()) {
+            None
+        } else {
+            Some(arg)
         }
-        Command {author_id, command_type, message: None, group: Some(group)}
+    }
+
+    fn get_group_or_user_command(author: &Client, command_string: String, command_type: CommandType) -> Command {
+        let group = Self::get_command_arg(command_string);
+        match group {
+            Some(group) => {
+                Command {
+                    author_id: author.id,
+                    author_name: author.username.clone(),
+                    command_type,
+                    message: None,
+                    group_or_user: Some(group)
+                }
+            }
+            None => { Self::invalid_command(author) }
+        }
     }
     fn from_string(command_string: String, author: &Client) -> Self {
         if command_string.starts_with("/") {
             return if command_string.starts_with("/help") {
-                Command {author_id:author.id, command_type: CommandType::Help, message: None, group: None }
+                Self::help_command(author)
             } else if command_string.starts_with("/join ") {
-                Self::get_group_and_create_command(author.id, command_string, CommandType::JoinGroup)
+                Self::get_group_or_user_command(author, command_string, CommandType::JoinGroup)
             } else if command_string.starts_with("/leave ") {
-                Self::get_group_and_create_command(author.id, command_string, CommandType::LeaveGroup)
+                Self::get_group_or_user_command(author, command_string, CommandType::LeaveGroup)
             } else if command_string.starts_with("/change ") {
-                Self::get_group_and_create_command(author.id, command_string, CommandType::ChangeMessageGroup)
+                Self::get_group_or_user_command(author, command_string, CommandType::ChangeMessageGroup)
+            } else if command_string.starts_with("/setname ") {
+                Self::get_group_or_user_command(author, command_string, CommandType::SetUsername)
             } else {
-                Self::invalid_command(author.id)
+                Self::invalid_command(author)
             }
         }
         Command {
             author_id: author.id,
+            author_name: author.username.clone(),
             command_type: CommandType::NormalMessage,
             message: Some(command_string),
-            group: Some(author.message_group.clone()),
+            group_or_user: Some(author.message_group.clone()),
         }
     }
-    fn invalid_command(author_id: usize) -> Self {
-        Command {author_id, command_type: CommandType::InvalidInput, message: None, group: None}
+    fn help_command(author: &Client) -> Self {
+        Command {
+            author_id:author.id, author_name:author.username.clone(),
+            command_type: CommandType::Help,
+            message: None, group_or_user: None }
+    }
+    fn invalid_command(author: &Client) -> Self {
+        Command {
+            author_id:author.id, author_name:author.username.clone(),
+            command_type: CommandType::InvalidInput,
+            message: None, group_or_user: None}
     }
     
 }
@@ -230,7 +275,7 @@ fn main() {
             panic!();
         }
     };
-    info!("Server succesfully opened.");
+    info!("Server successfully opened.");
     let unopened_connections = Arc::new(Mutex::new(Vec::<(TcpStream, SocketAddr)>::new()));
     let conn_clone = unopened_connections.clone();
     thread::spawn(move || {
@@ -267,7 +312,7 @@ fn main() {
         clients.retain(|client| {
             match client.receiver.try_recv() {
             Ok(msg) => {
-                commands.push(Command::from_string(msg, client)); true},
+           commands.push(Command::from_string(msg, client)); true},
             Err(TryRecvError::Disconnected) => {
                 removed_someone = true;
                 info!("{} disconnected", client.socket_addr.to_string());
