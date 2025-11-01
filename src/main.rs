@@ -249,7 +249,7 @@ fn main() {
     // initialize logging
     env_logger::init();
     let args:Vec<String> = env::args().collect();
-    let mut address:SocketAddr =  SocketAddr::from(([127, 0, 0, 1], 8080));
+    let mut address:SocketAddr =  SocketAddr::from(([0, 0, 0, 0], 8080));
     if args.len() > 2 {
         error!("Too many arguments provided. You should provide only a port number. Exiting...");
         panic!();
